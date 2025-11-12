@@ -336,7 +336,7 @@ def detect_llava_safety_neurons(
     batches = [_build_inputs(processor, p, blank, device) for p in prompts]
 
     # Baseline logits for each prompt
-    with torch.no_grad():
+    with torch.inference_mode():
         baseline_logits = [
             _forward_logits(model, batch) for batch in batches
         ]  # each (1, vocab)
@@ -369,17 +369,19 @@ def detect_llava_safety_neurons(
         h = down.register_forward_pre_hook(hook, with_kwargs=False)
 
         scores = torch.zeros(dim, device=device)
-        for g in groups:
-            hook.set_zero_indices(g)
-            # Accumulate distance across prompts
-            dist_sum = 0.0
-            for b, base in zip(batches, baseline_logits):
-                masked = _forward_logits(model, b)
-                dist = torch.norm(base - masked, p=2).item()
-                dist_sum += dist
-            # Attribute group distance equally to each neuron in group
-            per = dist_sum / float(len(g))
-            scores[g] = per
+        with torch.inference_mode():
+            for g in groups:
+                hook.set_zero_indices(g)
+                # Accumulate distance across prompts
+                dist_sum = 0.0
+                for b, base in zip(batches, baseline_logits):
+                    masked = _forward_logits(model, b)
+                    diff = (base - masked).float()
+                    dist = torch.norm(diff, p=2).item()
+                    dist_sum += dist
+                # Attribute group distance equally to each neuron in group
+                per = dist_sum / float(len(g))
+                scores[g] = per
 
         h.remove()
 
@@ -405,15 +407,17 @@ def detect_llava_safety_neurons(
         h = oproj.register_forward_pre_hook(hook, with_kwargs=False)
 
         scores = torch.zeros(dim, device=device)
-        for g in groups:
-            hook.set_zero_indices(g)
-            dist_sum = 0.0
-            for b, base in zip(batches, baseline_logits):
-                masked = _forward_logits(model, b)
-                dist = torch.norm(base - masked, p=2).item()
-                dist_sum += dist
-            per = dist_sum / float(len(g))
-            scores[g] = per
+        with torch.inference_mode():
+            for g in groups:
+                hook.set_zero_indices(g)
+                dist_sum = 0.0
+                for b, base in zip(batches, baseline_logits):
+                    masked = _forward_logits(model, b)
+                    diff = (base - masked).float()
+                    dist = torch.norm(diff, p=2).item()
+                    dist_sum += dist
+                per = dist_sum / float(len(g))
+                scores[g] = per
 
         h.remove()
 
@@ -547,9 +551,14 @@ def main():
 
     # Default output path
     if args.output is None:
-        os.makedirs("Safety-Neuron/output_neurons", exist_ok=True)
+        default_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "output_neurons")
+        )
+        os.makedirs(default_dir, exist_ok=True)
         safe_model = args.model.replace("/", "_")
-        args.output = f"Safety-Neuron/output_neurons/llava_neurons_{safe_model}.json"
+        args.output = os.path.join(
+            default_dir, f"llava_neurons_{safe_model}.json"
+        )
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
